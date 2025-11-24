@@ -1,0 +1,116 @@
+import os
+import torch
+from datasets import load_dataset
+from transformers import (
+    AutoModelForCausalLM,
+    AutoTokenizer,
+    BitsAndBytesConfig,
+    TrainingArguments,
+)
+from peft import LoraConfig
+from trl import SFTTrainer
+
+# ==========================================
+# 1. 설정 및 데이터 경로
+# ==========================================
+# 구글 드라이브 마운트
+if not os.path.exists('/content/drive'):
+    from google.colab import drive
+    drive.mount('/content/drive')
+
+BASE_PATH = '/content/drive/MyDrive/StyleTransfer_Project'
+DATA_PATH = f"{BASE_PATH}/train_data.jsonl"
+OUTPUT_DIR = f"{BASE_PATH}/bllossom_lora_adapter"
+MODEL_ID = "MLP-KTLim/llama-3-Korean-Bllossom-8B"
+
+# ==========================================
+# 2. 모델 로드 (Memory Safe Mode)
+# ==========================================
+print(f"🚀 모델 로딩 중... (Memory Safe Mode)")
+
+bnb_config = BitsAndBytesConfig(
+    load_in_4bit=True,
+    bnb_4bit_quant_type="nf4",
+    bnb_4bit_compute_dtype=torch.float16,
+)
+
+# 모델 로드
+model = AutoModelForCausalLM.from_pretrained(
+    MODEL_ID,
+    quantization_config=bnb_config,
+    device_map="auto",
+    trust_remote_code=True
+)
+model.config.use_cache = False
+model.config.pretraining_tp = 1
+
+# 토크나이저 로드
+tokenizer = AutoTokenizer.from_pretrained(MODEL_ID, trust_remote_code=True)
+tokenizer.pad_token = tokenizer.eos_token
+tokenizer.padding_side = "right"
+
+# ==========================================
+# 3. 데이터셋 로드 & 프롬프트 처리
+# ==========================================
+def formatting_prompts_func(examples):
+    output_texts = []
+    for i in range(len(examples['messages'])):
+        msgs = examples['messages'][i]
+        sys_msg = msgs[0]['content']
+        user_msg = msgs[1]['content']
+        assist_msg = msgs[2]['content']
+
+        # Bllossom(Llama-3) 프롬프트 구조
+        text = f"<|begin_of_text|><|start_header_id|>system<|end_header_id|>\n\n{sys_msg}<|eot_id|><|start_header_id|>user<|end_header_id|>\n\n{user_msg}<|eot_id|><|start_header_id|>assistant<|end_header_id|>\n\n{assist_msg}<|eot_id|>"
+        output_texts.append(text)
+    return output_texts
+
+print(f"데이터셋 읽는 중: {DATA_PATH}")
+dataset = load_dataset("json", data_files=DATA_PATH, split="train")
+
+# ==========================================
+# 4. 학습 설정 (안정된 버전 trl==0.8.6 기준)
+# ==========================================
+peft_config = LoraConfig(
+    r=16,
+    lora_alpha=32,
+    lora_dropout=0.05,
+    bias="none",
+    task_type="CAUSAL_LM",
+    target_modules=['q_proj', 'k_proj', 'v_proj', 'o_proj', 'gate_proj', 'up_proj', 'down_proj']
+)
+
+training_args = TrainingArguments(
+    output_dir=OUTPUT_DIR,
+    per_device_train_batch_size=1,   
+    gradient_accumulation_steps=8,   # [중요] 1개씩 8번 모아서 학습 (배치 8 효과)
+    gradient_checkpointing=True,     
+    learning_rate=2e-4,
+    num_train_epochs=1,
+    logging_steps=10,
+    fp16=True,
+    optim="paged_adamw_8bit",
+    save_strategy="epoch",
+    report_to="none"
+)
+
+trainer = SFTTrainer(
+    model=model,
+    train_dataset=dataset,
+    peft_config=peft_config,
+    tokenizer=tokenizer,
+    args=training_args,
+    formatting_func=formatting_prompts_func,
+    max_seq_length=512,
+)
+
+# ==========================================
+# 5. 학습 시작 및 저장
+# ==========================================
+print(" 학습 시작 ")
+trainer.train()
+
+print("모델 저장 중")
+trainer.model.save_pretrained(OUTPUT_DIR)
+tokenizer.save_pretrained(OUTPUT_DIR)
+print(f"저장 경로: {OUTPUT_DIR}")
