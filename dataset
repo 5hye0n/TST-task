@@ -1,0 +1,54 @@
+# 1. 필요한 라이브러리 설치
+!pip install -q datasets pandas
+
+import json
+import random
+import pandas as pd
+from datasets import load_dataset
+import os
+
+# 저장 경로 설정
+BASE_PATH = '/content/drive/MyDrive/StyleTransfer_Project'
+os.makedirs(BASE_PATH, exist_ok=True)
+
+print("1. 데이터 다운로드 중... (KLUE-STS)")
+# KLUE 벤치마크 중 STS(의미 유사도) 데이터셋 로드
+ds = load_dataset("klue", "sts", split="train")
+
+print(f"다운로드 완료! 총 데이터 개수: {len(ds)}개")
+
+# 2. 데이터 전처리 및 분리
+# 원래는 Pair로 되어 있지만, 우리가 할 '매칭' 작업을 위해 억지로 떼어놓고 섞습니다.
+source_sentences = [] # A 스타일 (가정)
+target_sentences = [] # B 스타일 (가정)
+
+for item in ds:
+    # 유사도 점수(labels.label)가 높은(3.0 이상) 것만 추출하여 의미 보존
+    # (KLUE STS label range: 0~5)
+    if item['labels']['label'] >= 3.0:
+        source_sentences.append(item['sentence1'])
+        target_sentences.append(item['sentence2'])
+
+print(f"유의미한 문장 확보: {len(source_sentences)}쌍")
+
+# 3. 비정렬화 (Unpairing) - 순서를 무작위로 섞음
+# 현실 세계의 데이터처럼 만들기 위해 B 리스트를 셔플합니다.
+random.shuffle(target_sentences)
+
+print("데이터 셔플 완료 (비정렬 상태 시뮬레이션)")
+print(f"List A 예시: {source_sentences[:3]}")
+print(f"List B 예시: {target_sentences[:3]}")
+
+# 4. JSONL 파일로 저장
+# 나중에 mining.py에서 불러올 파일들입니다.
+
+def save_to_json(data, filename):
+    file_path = os.path.join(BASE_PATH, filename)
+    with open(file_path, 'w', encoding='utf-8') as f:
+        json.dump(data, f, ensure_ascii=False, indent=4)
+    print(f"저장 완료: {file_path}")
+
+save_to_json(source_sentences, 'style_a_large.json')
+save_to_json(target_sentences, 'style_b_large.json')
+
+print("\n 데이터 준비 완료!")
