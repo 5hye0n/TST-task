@@ -1,0 +1,92 @@
+# 1. 라이브러리 설치 (이미 설치했다면 생략 가능)
+!pip install -q sentence-transformers pandas
+
+import json
+import os
+import torch
+from sentence_transformers import SentenceTransformer, util
+
+# ==========================================
+# [설정] 경로 및 모델
+# ==========================================
+BASE_PATH = '/content/drive/MyDrive/StyleTransfer_Project'
+MODEL_NAME = 'snunlp/KR-SBERT-V40K-klueNLI-augSTS' # 한국어 문장 비교 모델
+THRESHOLD = 0.85 # 유사도 85% 이상만 정답으로 인정
+
+# ==========================================
+# [로드] 비정렬 데이터 불러오기
+# ==========================================
+print("1. 데이터 파일 로딩 중...")
+try:
+    with open(f"{BASE_PATH}/style_a_large.json", 'r', encoding='utf-8') as f:
+        style_a_sentences = json.load(f)
+
+    with open(f"{BASE_PATH}/style_b_large.json", 'r', encoding='utf-8') as f:
+        style_b_sentences = json.load(f)
+
+    print(f"   - A 데이터(Source): {len(style_a_sentences)}개")
+    print(f"   - B 데이터(Target): {len(style_b_sentences)}개")
+
+except FileNotFoundError:
+    print(" 오류: 파일을 찾을 수 없습니다. 'style_a_large.json' 파일이 있는지 확인해주세요.")
+    # 실행 중단 방지용 더미 데이터
+    style_a_sentences = []
+    style_b_sentences = []
+
+# ==========================================
+# [매칭] 임베딩 & 유사도 계산 (GPU 사용)
+# ==========================================
+if style_a_sentences and style_b_sentences:
+    print("2. AI가 문장 의미를 분석하고 있습니다... (임베딩)")
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+    model = SentenceTransformer(MODEL_NAME, device=device)
+
+    # 문장을 벡터(숫자)로 변환
+    embeddings_a = model.encode(style_a_sentences, convert_to_tensor=True, show_progress_bar=True)
+    embeddings_b = model.encode(style_b_sentences, convert_to_tensor=True, show_progress_bar=True)
+
+    print("3. 잃어버린 짝을 찾는 중... (Semantic Search)")
+    # A 문장 하나하나에 대해 B 전체에서 가장 비슷한 녀석 1개 찾기
+    hits = util.semantic_search(embeddings_a, embeddings_b, top_k=1)
+
+    matched_data = []
+
+    # 검색 결과 정리
+    for idx, hit in enumerate(hits):
+        best_match = hit[0]
+        score = best_match['score']
+
+        # 유사도가 기준(0.85)보다 높은 경우만 저장
+        if score >= THRESHOLD:
+            source_text = style_a_sentences[idx]
+            target_text = style_b_sentences[best_match['corpus_id']]
+
+            # [중요] Bllossom 모델 학습용 데이터 포맷
+            # system: 역할 부여
+            # user: 원본 문장
+            # assistant: 변환된 문장 (정답)
+            entry = {
+                "messages": [
+                    {"role": "system", "content": "입력된 문장의 의미를 유지하며 목표 스타일로 변환하세요."},
+                    {"role": "user", "content": source_text},
+                    {"role": "assistant", "content": target_text}
+                ]
+            }
+            matched_data.append(entry)
+
+    print(f"\n 총 {len(matched_data)}개의 정답 쌍(Pair)을 찾았습니다.")
+    print(f"   (매칭률: {len(matched_data) / len(style_a_sentences) * 100:.2f}%)")
+
+    # ==========================================
+    # [저장] 학습용 파일(JSONL) 생성
+    # ==========================================
+    output_file = f"{BASE_PATH}/train_data.jsonl"
+    with open(output_file, 'w', encoding='utf-8') as f:
+        for entry in matched_data:
+            json.dump(entry, f, ensure_ascii=False)
+            f.write('\n')
+
+    print(f" 학습 데이터 저장 완료: {output_file}")
+
+else:
+    print("데이터가 비어있어 매칭을 진행할 수 없습니다.")
